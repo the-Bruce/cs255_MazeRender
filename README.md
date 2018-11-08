@@ -19,4 +19,4 @@ The *Update Speed* slider allows you to set how often the robot's nextMove funct
 ## Usage notes
 Please note: although effort has been taken to ensure that the output from this program is as faithful to the original files as possible there is a chance that small incompatabilities may exist. Please also check your program using only the provided files to ensure maximal correctness.
 
-Also, the graphical interface will hang if your robot's `nextMove` function takes a long time to return. Please be aware that it may become unresponsive if your program enters an infinite loop. None of the provided functions are able to interupt your robots calculations and in this case the whole application would need to be terminated.
+Also, the graphical interface will hang if your robot's `nextMove` function takes a long time to return. Please be aware that it may become completely unresponsive if your program enters an infinite loop. None of the provided functions are able to interupt your robot's calculations and in this case the whole application would need to be terminated.

@@ -1,6 +1,7 @@
 import tkinter as tk
 import tkinter.filedialog as tkf
 import Search, Robot
+
 import os, sys, tempfile
 
 
@@ -76,13 +77,16 @@ class GenerateDialog(Dialog):
     def body(self, master):
         self.rows = tk.IntVar(value=20)
         self.cols = tk.IntVar(value=20)
+        self.objects = tk.IntVar(value=0)
         self.density = tk.DoubleVar(value=.2)
         tk.Label(master, text="Rows: ").grid(row=0, column=0)
         tk.Entry(master, textvariable=self.rows).grid(row=0, column=1)
         tk.Label(master, text="Cols: ").grid(row=1, column=0)
         tk.Entry(master, textvariable=self.cols).grid(row=1, column=1)
+        tk.Label(master, text="Objects: ").grid(row=2, column=0)
+        tk.Entry(master, textvariable=self.objects).grid(row=2, column=1)
         tk.Scale(master, label="Density: ", from_=0, to=1, resolution=.05, tick=.25, length=300, variable=self.density,
-                 orient=tk.HORIZONTAL).grid(row=2, column=0, columnspan=2)
+                 orient=tk.HORIZONTAL).grid(row=3, column=0, columnspan=2)
 
     def validate(self):
         flag = True
@@ -95,27 +99,37 @@ class GenerateDialog(Dialog):
         if not (0 <= self.density.get() <= 1):
             flag = False
             self.density.set(.2)
-
+        if not (0 <= self.objects.get() <= 30):
+            flag = False
+            self.objects.set(0)
         return flag
 
     def apply(self):
         cols = self.cols.get()
         rows = self.rows.get()
         density = self.density.get()
-        self.result = {"cols": cols, "rows": rows, "density": density}
+        objects = self.objects.get()
+        self.result = {"cols": cols, "rows": rows, "density": density, "items": objects}
 
 
 class MazeApp(tk.Frame):
-    COLOURS = {0: "white", 1: "gray", 2: "green", 3: "blue", -1: "red"}
+    COLOURS = {0: "white", 1: "gray", 2: "green", 3: "blue", 4: "white", 5: "white", -1: "magenta", -2: "yellow",
+               -3: "red"}
+    ENEMY_COLS = {"predefined-known": "lightGreen", "predefined-unknown": "lightblue", "random": "orange",
+                  "aggressive": "red"}
 
     def __init__(self, master, game, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
         self.gameState = game
         self.collisions = tk.IntVar(self, value=0)
+        self.attacks = tk.IntVar(self, value=0)
         self.steps = tk.IntVar(self, value=0)
+        self.objectsRet = tk.IntVar(self, value=0)
+        self.objectsTot = tk.IntVar(self, value=game.game.numberOfObjs())
         self.timer = None
         self.width = 800
         self.height = 800
+        self.unsaved = False
         lPanel = tk.Frame(self)
         self.canvas = tk.Canvas(lPanel, width=800, height=800, bg="white")
         self.canvas.pack(anchor=tk.CENTER)
@@ -125,6 +139,14 @@ class MazeApp(tk.Frame):
         tk.Label(rPanel, textvariable=self.steps, font='-weight bold -size 12').pack(side=tk.TOP)
         tk.Label(rPanel, text="Collisions:", font='-weight bold -size 12').pack(side=tk.TOP)
         tk.Label(rPanel, textvariable=self.collisions, font='-weight bold -size 12', fg='red').pack(side=tk.TOP)
+        tk.Label(rPanel, text="Enemy Attacks:", font='-weight bold -size 12').pack(side=tk.TOP)
+        tk.Label(rPanel, textvariable=self.attacks, font='-weight bold -size 12', fg='red').pack(side=tk.TOP)
+        tk.Label(rPanel, text="Retrieved:", font='-weight bold -size 12').pack(side=tk.TOP)
+        rtGrp = tk.Frame(rPanel)
+        tk.Label(rtGrp, textvariable=self.objectsRet, font='-weight bold -size 12', fg='red').pack(side=tk.LEFT, padx=2)
+        tk.Label(rtGrp, text="out of", font='-weight bold -size 12').pack(side=tk.LEFT, padx=2)
+        tk.Label(rtGrp, textvariable=self.objectsTot, font='-weight bold -size 12').pack(side=tk.LEFT, padx=2)
+        rtGrp.pack(side=tk.TOP)
         tk.Label(rPanel, text="").pack(side=tk.TOP)
 
         tk.Button(rPanel, text="Step", command=self.step).pack(side=tk.TOP)
@@ -132,6 +154,13 @@ class MazeApp(tk.Frame):
         tk.Button(rPanel, text="Pause", command=self.pause).pack(side=tk.TOP)
         tk.Button(rPanel, text="Restart", command=self.restart).pack(side=tk.TOP)
         tk.Button(rPanel, text="Render", command=self.full_render).pack(side=tk.TOP)
+        tk.Button(rPanel, text="ConsolePrint", command=self)
+        tk.Label(rPanel, text="").pack(side=tk.TOP)
+
+        self.gamemodeVar = tk.IntVar(value=self.gameState.gameArgs['gameType'])
+        self.gamemodeVar.trace_variable('w', self.changeGamemode)
+        tk.Label(rPanel, text="Game mode:").pack(side=tk.TOP)
+        tk.OptionMenu(rPanel, self.gamemodeVar, 1, 2, 3).pack(side=tk.TOP)
         tk.Label(rPanel, text="").pack(side=tk.TOP)
 
         tk.Button(rPanel, text="Load Board", command=self.load).pack(side=tk.TOP)
@@ -150,6 +179,9 @@ class MazeApp(tk.Frame):
         self.canvas.bind("<Button-3>", self.rClick)
 
     def lClick(self, event):
+        if self.timer:
+            return
+        self.unsaved = True
         (rowSize, colSize) = self.getGridSize()
         row = event.y // rowSize
         col = event.x // colSize
@@ -164,6 +196,9 @@ class MazeApp(tk.Frame):
         self.full_render()
 
     def rClick(self, event):
+        if self.timer:
+            return
+        self.unsaved = True
         (rowSize, colSize) = self.getGridSize()
         row = event.y // rowSize
         col = event.x // colSize
@@ -172,15 +207,17 @@ class MazeApp(tk.Frame):
         popup.add_command(label="Wall", command=lambda: self.changeSquare(1, row, col))
         popup.add_command(label="Goal", command=lambda: self.changeSquare(2, row, col))
         popup.add_command(label="Start", command=lambda: self.changeSquare(3, row, col))
+        popup.add_command(label="Object", command=lambda: self.changeSquare(4, row, col))
         try:
             popup.tk_popup(event.x_root, event.y_root)
         finally:
             popup.grab_release()
 
     def changeSquare(self, target, row, col):
+        # So many special cases...
         old = self.gameState.game.board.scanSpace(row, col)
-        if old == 3:
-            return  # Must always have a start square so no overwriting
+        if old == 3 or old == 5:
+            return  # Must always have a start square so no overwriting, and overwriting enemies is not supported
         if old == 2:
             if self.gameState.game.getGoal() == [row, col]:
                 for i in range(self.gameState.game.rows):
@@ -191,6 +228,10 @@ class MazeApp(tk.Frame):
             if self.gameState.game.getGoal() == [row, col]:
                 # No alternative found, so don't allow replacing final goal
                 return
+        if old == 4:
+            # Update the game data for the new number of objects
+            self.gameState.game.totalItems = self.gameState.game.totalItems - 1
+            self.gameState.game.board.totalItems = self.gameState.game.board.totalItems - 1
         if target == 2:
             self.gameState.game.board.goal = [row, col]  # Use newest goal as target
         if target == 3:
@@ -201,9 +242,18 @@ class MazeApp(tk.Frame):
                 self.gameState.game.currentCol = col  # Move robot to new start
                 self.gameState.game.currentRow = row
                 self.gameState.moveList = [(row, col, "")]
+        if target == 4:
+            # Update the game data for the new number of objects
+            self.gameState.game.totalItems = self.gameState.game.totalItems + 1
+            self.gameState.game.board.totalItems = self.gameState.game.board.totalItems + 1
 
         self.gameState.game.board.updateSpace(row, col, target)
         self.full_render()
+
+    def changeGamemode(self, *args):
+        var = self.gamemodeVar.get()
+        self.gameState.gameArgs['gameType'] = var
+        self.restart()
 
     def getRate(self):
         r = self.rate.get()
@@ -216,7 +266,7 @@ class MazeApp(tk.Frame):
         newFile = tkf.askopenfilename(parent=self, initialdir=os.path.join(PATH, 'exampleMazes'),
                                       title="Select Maze",
                                       filetypes=(("Maze Files", "*.maze"), ("Maze Files", "*.txt")))
-        self.gameState.gameArgs = {'gameType': self.gameState.gameArgs.get('gameType'), 'file': newFile}
+        self.gameState.gameArgs = {'gameType': self.gameState.gameArgs['gameType'], 'file': newFile}
         self.reset()
 
     def save(self):
@@ -233,15 +283,14 @@ class MazeApp(tk.Frame):
         result = self.gameState.gameArgs
         if dialogBox.result:
             result = dialogBox.result
-            result['gameType'] = 1
+            result['gameType'] = self.gameState.gameArgs['gameType']
             result['file'] = ""
-            result['items'] = 0
             result['eTups'] = list()
         self.gameState.gameArgs = result
         self.reset()
 
     def start(self):
-        self.gameState.done=False
+        self.gameState.done = False
         self.timer = self.after(self.getRate(), self.on_time)
 
     def pause(self):
@@ -251,7 +300,11 @@ class MazeApp(tk.Frame):
 
     def restart(self):
         self.pause()
-        self.gameState.restart()
+        if self.unsaved:
+            self.gameState.restart()
+        else:
+            self.gameState.reset()
+        self.canvas.delete("all")
         self.full_render()
 
     def reset(self):
@@ -266,6 +319,9 @@ class MazeApp(tk.Frame):
             self.timer = self.after(self.getRate(), self.on_time)
 
     def step(self):
+        if self.unsaved:
+            self.unsaved = False
+            self.gameState.tempSave()
         self.gameState.nextAction()
         self.partial_render()
 
@@ -278,16 +334,36 @@ class MazeApp(tk.Frame):
         # Update counters
         self.collisions.set(self.gameState.game.collisions)
         self.steps.set(self.gameState.game.movesMade)
+        self.objectsTot.set(self.gameState.game.numberOfObjs())
+        self.objectsRet.set(self.gameState.game.itemsRetrieved)
         # Redraw maze grid
         (row, col) = self.getGridSize()
         colx = 0
 
+        # render board colours
         for i in self.gameState.game.board.room:
             colx = colx + col
             rowx = 0
             for j in i:
                 rowx += row
                 self.canvas.create_rectangle(rowx, colx, rowx - row, colx - col, fill=self.COLOURS[j.scanSpace()])
+                if j.scanSpace() == 4:
+                    self.canvas.create_rectangle(rowx - row / 4, colx - col / 4, rowx - 3 * row / 4, colx - 3 * col /
+                                                 4, fill=self.COLOURS[-2], tag="object")
+                if j.scanSpace() == 5:
+                    f = False
+                    for en in self.gameState.game.enemyList:
+
+                        if en.currRow==(colx//col)-1 and en.currCol==(rowx//row)-1:
+                            f = True
+                            self.canvas.create_oval(rowx, colx, rowx - row, colx - col,
+                                                    fill=self.ENEMY_COLS[en.tactic],
+                                                    tag="enemy")
+                    if not f:
+                        self.canvas.create_oval(rowx, colx, rowx - row, colx - col,
+                                                fill=self.COLOURS[-3],
+                                                tag="enemy")
+
         # Render path taken
         lastR, lastC, discard = self.gameState.moveList[0]
         lastX = lastC * col + col // 2
@@ -313,11 +389,20 @@ class MazeApp(tk.Frame):
         rCol = self.gameState.game.currentCol * col
         rRow = self.gameState.game.currentRow * row
         self.canvas.create_oval(rCol, rRow, rCol + col, rRow + row, fill=self.COLOURS[-1], tag="robot")
+        if self.gameState.game.robotCarrying():
+            self.canvas.create_rectangle(rCol + col / 4, rRow + row / 4, rCol + 3 * col / 4, rRow + 3 * row / 4,
+                                         fill=self.COLOURS[-2], tag="robot")
 
     def partial_render(self):
+        # Update counters
+        self.collisions.set(self.gameState.game.collisions)
+        self.steps.set(self.gameState.game.movesMade)
+        self.attacks.set(self.gameState.game.enemyCollisions)
+        self.objectsTot.set(self.gameState.game.numberOfObjs())
+        self.objectsRet.set(self.gameState.game.itemsRetrieved)
         (row, col) = self.getGridSize()
 
-        if len(self.gameState.moveList)>=2:
+        if len(self.gameState.moveList) >= 2:
             (X, Y, discard) = self.gameState.moveList[-2]
         else:
             (X, Y) = self.gameState.game.getStart()
@@ -344,6 +429,34 @@ class MazeApp(tk.Frame):
         rCol = self.gameState.game.currentCol * col
         rRow = self.gameState.game.currentRow * row
         self.canvas.create_oval(rCol, rRow, rCol + col, rRow + row, fill=self.COLOURS[-1], tag="robot")
+        if self.gameState.game.robotCarrying():
+            self.canvas.create_rectangle(rCol + col / 4, rRow + row / 4, rCol + 3 * col / 4, rRow + 3 * row / 4,
+                                         fill=self.COLOURS[-2], tag="robot")
+
+        self.canvas.delete("enemy")
+        self.canvas.delete("object")
+        colx = 0
+        for i in self.gameState.game.board.room:
+            colx = colx + col
+            rowx = 0
+            for j in i:
+                rowx += row
+                if j.scanSpace() == 4:
+                    self.canvas.create_rectangle(rowx - row / 4, colx - col / 4, rowx - 3 * row / 4, colx - 3 * col /
+                                                 4, fill=self.COLOURS[-2], tag="object")
+                if j.scanSpace() == 5:
+                    f = False
+                    for en in self.gameState.game.enemyList:
+
+                        if en.currRow == (colx // col) - 1 and en.currCol == (rowx // row) - 1:
+                            f = True
+                            self.canvas.create_oval(rowx, colx, rowx - row, colx - col,
+                                                    fill=self.ENEMY_COLS[en.tactic],
+                                                    tag="enemy")
+                    if not f:
+                        self.canvas.create_oval(rowx, colx, rowx - row, colx - col,
+                                                fill=self.COLOURS[-3],
+                                                tag="enemy")
 
 
 class GameState:
@@ -351,13 +464,10 @@ class GameState:
         self.robotProto = robot
         self.done = False
         self.moveList = []
-        self.gameArgs = {'gameType': type, "file": maze}
+        self.gameArgs = {"gameType": type, "file": maze}
         self.reset()
 
     def reset(self):
-        if self.gameArgs.get("gameType") != 1:
-            raise NotImplementedError('This version only fully supports game type 1. Remove this error at your own '
-                                      'peril')
         self.game = Search.Game(**self.gameArgs)
         self.robot = self.robotProto()
         self.moveList = []
@@ -366,34 +476,80 @@ class GameState:
         print("Starting in Space: " + str([self.game.currentRow, self.game.currentCol]))
 
     def restart(self):
-        temp = os.path.join(tempfile.gettempdir(), 'cs255_cw1temp.maze')
+        self.tempSave()
+        self.reset()
+
+    def tempSave(self):
+        temp = os.path.join(tempfile.gettempdir(), 'cs255_cw2temp.maze')
         if os.path.exists(temp):
             os.remove(temp)
         self.game.board.writeBoard(temp)
         self.gameArgs = {'gameType': self.gameArgs.get('gameType'), 'file': temp}
-        self.reset()
 
     def nextAction(self):
-        if self.game.gameType == 1:
-            nextMove = self.robot.nextMove(self.game, self.game.gameType)
+        print(self.game.gameType)
+
+        nextMove = self.robot.nextMove(self.game, self.game.gameType)
+
+        if self.game.gameType == 1 or self.game.gameType == 2:
             if nextMove == "STOP":
                 self.checkGoal()
                 self.done = True
             else:
                 self.game.moveRobot(nextMove, verbose=True)
                 self.moveList.append((self.game.currentRow, self.game.currentCol, nextMove))
+        if self.game.gameType == 3:
+
+            if nextMove == "STOP":
+                self.checkGoal()
+                self.done = True
+            else:
+                print("Moving robot")
+                self.game.moveRobot(nextMove, verbose=True)
+                print("Moving Enemy")
+                self.game.moveEnemyRobots(verbose=True)
+                self.moveList.append((self.game.currentRow, self.game.currentCol, nextMove))
 
     def checkGoal(self):
-        if self.game.atGoal():
-            print(str(self.robot.name) + " has successfully navigated the terrain!")
-            print("Moves made: " + str(self.game.movesMade))
-            print("Collisions: " + str(self.game.collisions))
-            return True
-        else:
-            print(str(self.robot.name) + " did not reach the goal.")
-            print("Moves made: " + str(self.game.movesMade))
-            print("Collisions: " + str(self.game.collisions))
-            return False
+        if self.game.gameType == 1:
+            if self.game.atGoal():
+                print(str(self.robot.name) + " has successfully navigated the terrain!")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                return True
+            else:
+                print(str(self.robot.name) + " did not reach the goal.")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                return False
+        if self.game.gameType == 2:
+            if self.game.atGoal():
+                print(str(self.robot.name) + " has successfully navigated the terrain!")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                print("Retrieved " + str(self.game.itemsRetrieved) + " out of " + str(self.game.totalItems))
+                return True
+            else:
+                print(str(self.robot.name) + " did not reach the goal.")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                print("Retrieved " + str(self.game.itemsRetrieved) + " out of " + str(self.game.totalItems))
+                return False
+        if self.game.gameType == 3:
+            if self.game.atGoal():
+                print(str(self.robot.name) + " has successfully navigated the terrain!")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                print("Enemy Collisions: " + str(self.game.enemyCollisions))
+                print("Retrieved " + str(self.game.itemsRetrieved) + " out of " + str(self.game.totalItems))
+                return True
+            else:
+                print(str(self.robot.name) + " did not reach the goal.")
+                print("Moves made: " + str(self.game.movesMade))
+                print("Collisions: " + str(self.game.collisions))
+                print("Enemy Collisions: " + str(self.game.enemyCollisions))
+                print("Retrieved " + str(self.game.itemsRetrieved) + " out of " + str(self.game.totalItems))
+                return False
 
 
 PATH = ''
@@ -404,7 +560,7 @@ elif __file__:
 
 if __name__ == '__main__':
     ROOT = tk.Tk()
-    [gT, mazeFile] = [1, "exampleMazes/GameType1/10Squares.txt"]
+    [gT, mazeFile] = [3, "exampleMazes/GameType3/50Squares-PDFK.txt"]
     gameState = GameState(gT, mazeFile, Robot.Robot)
     render = MazeApp(ROOT, gameState)
     ROOT.mainloop()
